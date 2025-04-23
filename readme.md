@@ -1,24 +1,5 @@
 # AWS Hands-on Workshop: Infrastructure as Code and Advanced Monitoring
 
-## Overview
-This follow-up workshop builds on the previous application stack experience by implementing infrastructure as code (IaC) with CloudFormation and adding advanced monitoring and testing capabilities. You'll deploy the existing architecture through CloudFormation, then extend it with EC2 connectivity, monitoring, and stress testing features.
-
-**Target Audience:** IT Operations professionals with basic AWS experience  
-**Prerequisites:** Completion of the previous "Application Stack" workshop
-
-## Architecture
-By the end of this workshop, you will have created the following architecture:
-
-```
-Internet → API Gateway → Application Load Balancer → ECS (Containers) → RDS PostgreSQL
-                                                   ↑
-                                                   EC2 (for DB access)
-                                                   ↓
-CloudWatch Alarms ← RDS Metrics ← Lambda (Load Testing) 
-       ↓
-Auto-remediation
-```
-
 ## Setup Requirements
 - AWS Console access to the sandbox account
 - Default VPC available
@@ -43,14 +24,14 @@ Auto-remediation
 
 #### 1.3 Stack Deployment
 1. Navigate to CloudFormation in the AWS Console
-2. Click "Create stack" with new resources
-3. Upload the template file
+2. Click "Create stack" > "With new resources (standard)
+3. Upload the template file "cloudformation.yaml"
 4. Fill in the required parameters:
    - InitialsParam: Your initials (e.g., `jama` for Jan Marek)
    - DBUsername: Database username
    - DBPassword: Database password (use `Workshop#123` for this lab)
    - VpcId: Select your default VPC
-   - Subnet1 and Subnet2: Select two different public subnets
+   - Subnet1 and Subnet2: Select two different subnets
 5. Review and create the stack
 6. Monitor the stack creation events
 7. Once complete, go to the Outputs tab and note:
@@ -80,18 +61,17 @@ Auto-remediation
 #### 2.2 EC2 Instance Setup
 1. Navigate to EC2 → Instances
 2. Click "Launch instances"
-3. Choose Amazon Linux 2023 AMI
-4. Select t3.micro instance type
-5. Configure instance details:
+3. Name: "{initials}-ec2"
+4. Choose Amazon Linux 2023 AMI
+5. Select t2.micro instance type
+6. Create a new key pair
+6. Configure instance details:
    - Network: Default VPC
-   - Subnet: Select any public subnet
+   - Subnet: No preference
    - Auto-assign Public IP: Enable
-6. Add storage: Leave as default (8 GB)
-7. Add tags: Name = `{initials}-rds-client`
-8. Configure Security Group: Select the security group created earlier
-9. Review and launch
-10. Create or select an existing key pair and download it
-11. Launch the instance
+7. Configure Security Group: Select the security group created earlier
+8. Add storage: Leave as default (8 GB)
+10. Launch instance
 12. Wait for the instance to be in the "running" state
 
 #### 2.3 Connect and Configure the EC2 Instance
@@ -136,9 +116,9 @@ Auto-remediation
 ### Module 3: RDS Monitoring and Alerting (30 minutes)
 
 #### 3.1 CloudWatch Alarm Creation
-1. Navigate to CloudWatch → Alarms → Create alarm
+1. Navigate to CloudWatch → Alarms → All alarms → Create alarm
 2. Select "Select metric"
-3. Navigate to RDS → Per-Database Metrics
+3. Navigate to RDS → DBInstanceIdentifier
 4. Find your database instance and select CPUUtilization
 5. Configure the metric:
    - Statistic: Average
@@ -147,7 +127,7 @@ Auto-remediation
    - Threshold type: Static
    - Define the alarm condition: Greater than 80%
    - Additional configuration: 
-     - Datapoints to alarm: 3 out of 3
+     - Datapoints to alarm: 1 out of 1
      - Missing data treatment: Treat missing data as missing
 7. Configure actions:
    - Create a new SNS topic: `{initials}-rds-alarm`
@@ -165,179 +145,178 @@ Auto-remediation
 3. Use the same SNS topic for notifications
 4. Name it `{initials}-rds-connections-alarm`
 
-### Module 4: Load Testing with Lambda (45 minutes)
+### Module 4: Load Testing with EC2 Shell Script (45 minutes)
 
-#### 4.1 Lambda Security Group Setup
-1. Navigate to EC2 → Security Groups
-2. Create a new security group:
-   - Name: `{initials}-lambda-sg`
-   - Description: "Security group for RDS load generator Lambda"
-   - VPC: Default VPC
-   - No inbound rules needed
-3. Add a rule to the DB security group:
-   - Select the `{initials}-db-sg` security group
-   - Add inbound rule: PostgreSQL (5432) from the Lambda security group
-
-#### 4.2 Lambda Execution Role Creation
-1. Navigate to IAM → Roles
-2. Click "Create role"
-3. Select AWS service as the trusted entity
-4. Choose Lambda as the use case
-5. Click "Next: Permissions"
-6. Attach the following policies:
-   - AWSLambdaVPCAccessExecutionRole
-   - AmazonRDSDataFullAccess
-7. Click "Next: Tags"
-8. Add tag: Name = `{initials}-lambda-role`
-9. Review and create the role
-
-#### 4.3 Lambda Function Creation
-1. Navigate to Lambda → Functions
-2. Click "Create function"
-3. Choose "Author from scratch"
-4. Configure basic information:
-   - Function name: `{initials}-rds-load-generator`
-   - Runtime: Node.js 16.x
-   - Execution role: Use the role created earlier
-5. Click "Create function"
-6. Under VPC configuration:
-   - VPC: Select default VPC
-   - Subnets: Select at least two subnets
-   - Security group: Select the Lambda security group
-7. Set environment variables:
-   - DB_HOST: Your RDS endpoint
-   - DB_NAME: Your database name
-   - DB_USER: Your database username
-   - DB_PASSWORD: Workshop#123
-8. Paste the following code:
-
-```javascript
-const { Client } = require('pg');
-
-exports.handler = async (event, context) => {
-  const concurrency = event.concurrency || 10; // Number of parallel queries
-  const duration = event.duration || 30; // Duration in seconds
-  
-  console.log(`Starting load test with ${concurrency} parallel connections for ${duration} seconds`);
-  
-  const client = new Client({
-    host: process.env.DB_HOST,
-    database: process.env.DB_NAME,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    port: 5432,
-  });
-  
-  try {
-    await client.connect();
-    
-    // Create test table if it doesn't exist
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS load_test (
-        id SERIAL PRIMARY KEY,
-        random_data TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    
-    // Start time
-    const startTime = Date.now();
-    const endTime = startTime + (duration * 1000);
-    
-    let totalQueries = 0;
-    
-    // Run load test
-    const tasks = [];
-    for (let i = 0; i < concurrency; i++) {
-      tasks.push(runLoadQueries(client, endTime));
-    }
-    
-    const results = await Promise.all(tasks);
-    totalQueries = results.reduce((sum, count) => sum + count, 0);
-    
-    const elapsedSeconds = (Date.now() - startTime) / 1000;
-    console.log(`Load test completed: ${totalQueries} queries executed in ${elapsedSeconds.toFixed(2)} seconds`);
-    console.log(`Rate: ${(totalQueries / elapsedSeconds).toFixed(2)} queries/second`);
-    
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        totalQueries,
-        queriesPerSecond: totalQueries / elapsedSeconds,
-        durationSeconds: elapsedSeconds
-      })
-    };
-  } catch (error) {
-    console.error('Error during load test:', error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: error.message })
-    };
-  } finally {
-    await client.end();
-  }
-};
-
-async function runLoadQueries(client, endTime) {
-  let queryCount = 0;
-  
-  while (Date.now() < endTime) {
-    try {
-      // Insert random data (generates load)
-      await client.query(`
-        INSERT INTO load_test (random_data)
-        VALUES ($1)
-      `, [generateRandomString(100)]);
-      
-      // Run a complex query (generates CPU load)
-      await client.query(`
-        SELECT count(*), 
-               min(created_at), 
-               max(created_at), 
-               avg(length(random_data))
-        FROM load_test
-        GROUP BY date_trunc('second', created_at)
-        ORDER BY 1 DESC
-        LIMIT 10
-      `);
-      
-      queryCount += 2;
-    } catch (error) {
-      console.error('Query error:', error);
-      // Continue despite errors
-    }
-  }
-  
-  return queryCount;
-}
-
-function generateRandomString(length) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let result = '';
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
-}
-```
-
-9. Set a longer timeout (2-3 minutes) in the Configuration tab
-10. Click "Deploy" to save the changes
-
-#### 4.4 Testing the Load Generator
-1. Create a test event with the following JSON:
-   ```json
-   {
-     "concurrency": 20,
-     "duration": 60
-   }
+#### 4.1 Install Required Packages on EC2
+1. Connect to your EC2 instance:
    ```
-2. Save the test event and click "Test"
-3. Monitor the function execution in the console
-4. Switch to another tab to view:
+   ssh -i your-key.pem ec2-user@your-ec2-public-dns
+   ```
+2. Install required packages:
+   ```
+   sudo yum update -y
+   sudo yum install -y postgresql15 jq bc
+   ```
+
+#### 4.2 Create the Load Testing Script
+1. Create a new script file:
+   ```
+   nano rds-load-test.sh
+   ```
+2. Copy and paste the following script:
+   ```bash
+   #!/bin/bash
+   
+   # RDS Load Test Script
+   # Usage: ./rds-load-test.sh [concurrent_processes] [duration_seconds]
+   
+   # Configuration
+   DB_HOST="YOUR_RDS_ENDPOINT"  # Replace with your RDS endpoint
+   DB_NAME="YOUR_DB_NAME"       # Replace with your database name
+   DB_USER="YOUR_DB_USERNAME"   # Replace with your database username
+   DB_PASSWORD="Workshop#123"   # Replace with your database password
+   
+   # Default parameters
+   CONCURRENT=${1:-10}          # Default: 10 concurrent processes
+   DURATION=${2:-30}            # Default: 30 seconds runtime
+   
+   # Colors for output
+   GREEN='\033[0;32m'
+   YELLOW='\033[1;33m'
+   BLUE='\033[0;34m'
+   RED='\033[0;31m'
+   NC='\033[0m' # No Color
+   
+   # Ensure the test table exists
+   echo -e "${BLUE}Creating test table if it doesn't exist...${NC}"
+   PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME <<EOF
+   CREATE TABLE IF NOT EXISTS load_test (
+       id SERIAL PRIMARY KEY,
+       random_data TEXT,
+       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+   );
+   EOF
+   
+   if [ $? -ne 0 ]; then
+       echo -e "${RED}Failed to create test table. Check your connection parameters.${NC}"
+       exit 1
+   fi
+   
+   # Generate a random string of specified length
+   generate_random_string() {
+       local length=$1
+       cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w $length | head -n 1
+   }
+   
+   # Function to run queries in a loop
+   run_queries() {
+       local process_id=$1
+       local end_time=$2
+       local query_count=0
+       
+       while [ $(date +%s) -lt $end_time ]; do
+           # Generate random data for insert
+           RANDOM_DATA=$(generate_random_string 100)
+           
+           # Insert data (generates load)
+           PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "INSERT INTO load_test (random_data) VALUES ('$RANDOM_DATA');" >/dev/null 2>&1
+           
+           # Run a complex query (generates CPU load)
+           PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "
+           SELECT count(*),
+               min(created_at),
+               max(created_at),
+               avg(length(random_data))
+           FROM load_test
+           GROUP BY date_trunc('second', created_at)
+           ORDER BY 1 DESC
+           LIMIT 10;" >/dev/null 2>&1
+           
+           query_count=$((query_count + 2))
+           
+           # Optional small delay to prevent overwhelming the system
+           sleep 0.05
+       done
+       
+       # Return the query count
+       echo $query_count
+   }
+   
+   # Main execution
+   echo -e "${YELLOW}Starting load test with ${CONCURRENT} parallel processes for ${DURATION} seconds${NC}"
+   
+   # Calculate end time
+   START_TIME=$(date +%s)
+   END_TIME=$((START_TIME + DURATION))
+   
+   # Launch background processes
+   pids=()
+   for i in $(seq 1 $CONCURRENT); do
+       run_queries $i $END_TIME > /tmp/queries_$i.log &
+       pids+=($!)
+       echo -e "${BLUE}Started process $i with PID ${pids[-1]}${NC}"
+   done
+   
+   # Wait for all processes to complete
+   echo -e "${YELLOW}Waiting for all processes to complete...${NC}"
+   for pid in ${pids[@]}; do
+       wait $pid
+   done
+   
+   # Collect and sum up results
+   TOTAL_QUERIES=0
+   for i in $(seq 1 $CONCURRENT); do
+       PROCESS_QUERIES=$(cat /tmp/queries_$i.log)
+       TOTAL_QUERIES=$((TOTAL_QUERIES + PROCESS_QUERIES))
+       rm /tmp/queries_$i.log
+   done
+   
+   # Calculate elapsed time and queries per second
+   ELAPSED_SECONDS=$(($(date +%s) - START_TIME))
+   QUERIES_PER_SECOND=$(echo "scale=2; $TOTAL_QUERIES / $ELAPSED_SECONDS" | bc)
+   
+   # Print results
+   echo -e "${GREEN}Load test completed${NC}"
+   echo -e "${GREEN}Total queries: ${TOTAL_QUERIES}${NC}"
+   echo -e "${GREEN}Duration: ${ELAPSED_SECONDS} seconds${NC}"
+   echo -e "${GREEN}Rate: ${QUERIES_PER_SECOND} queries/second${NC}"
+   
+   # Show the data count in the table
+   echo -e "${BLUE}Current row count in load_test table:${NC}"
+   PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM load_test;"
+   ```
+3. Replace placeholder values with your actual values:
+   ```
+   DB_HOST="your-db-endpoint.rds.amazonaws.com"  # From CloudFormation outputs
+   DB_NAME="your_db_name"                        # Usually postgres or the name you specified
+   DB_USER="your_username"                       # From CloudFormation parameters
+   DB_PASSWORD="Workshop#123"                    # From CloudFormation parameters
+   ```
+4. Make the script executable:
+   ```
+   chmod +x rds-load-test.sh
+   ```
+
+#### 4.3 Running Load Tests
+1. Run a test with moderate load:
+   ```
+   ./rds-load-test.sh 10 30
+   ```
+   This will run 10 concurrent processes for 30 seconds.
+
+2. Monitor the output to see the query execution rate and results.
+
+#### 4.4 Testing with Higher Load
+1. Run the script with higher concurrency to generate more load:
+   ```
+   ./rds-load-test.sh 20 60
+   ```
+   This will run 20 concurrent processes for 60 seconds.
+
+2. In the AWS Console, monitor:
    - CloudWatch metrics for your RDS instance
    - CloudWatch alarm status
-   - Your email for alarm notifications
+   - Email notifications from your alarms
 
 ### Module 5: Auto-Remediation (30 minutes)
 
@@ -353,102 +332,96 @@ function generateRandomString(length) {
    - Endpoint: Your email address
 5. Click "Create subscription" and confirm in your email
 
-#### 5.2 Creating a Lambda Function for Auto-Remediation
-1. Create a new Lambda function:
-   - Name: `{initials}-rds-remediation`
-   - Runtime: Node.js 16.x
-   - Create a new execution role with basic Lambda permissions
-2. Add the AmazonRDSFullAccess managed policy to the role
-3. Add the following code:
+#### 5.2 Creating a Simple Lambda Function for Auto-Remediation
+1. Navigate to Lambda → Functions
+2. Click "Create function"
+3. Select "Author from scratch"
+4. Configure basic information:
+   - Function name: `{initials}-rds-remediation`
+   - Runtime: Python 3.13
+   - Execution role: Create a new role with basic Lambda permissions
+5. Click "Create function"
+6. Replace the default code with this simple Python script:
 
-```javascript
-const AWS = require('aws-sdk');
-const rds = new AWS.RDS();
+```python
+import json
 
-exports.handler = async (event, context) => {
-  console.log('Received event:', JSON.stringify(event, null, 2));
-  
-  // Parse the SNS message
-  const message = JSON.parse(event.Records[0].Sns.Message);
-  console.log('Alarm message:', JSON.stringify(message, null, 2));
-  
-  // Get the RDS instance identifier from the alarm
-  const alarmName = message.AlarmName;
-  const instanceId = message.Trigger.Dimensions.find(d => d.name === 'DBInstanceIdentifier').value;
-  
-  console.log(`Alarm ${alarmName} triggered for RDS instance ${instanceId}`);
-  
-  if (message.NewStateValue === 'ALARM') {
-    console.log('Taking remediation action...');
+def lambda_handler(event, context):
+    print("Auto-remediation function activated!")
     
-    // You can implement different remediation actions based on the alarm
-    // Example: Get instance info
-    const instanceInfo = await rds.describeDBInstances({
-      DBInstanceIdentifier: instanceId
-    }).promise();
+    # Parse the SNS message
+    message = json.loads(event['Records'][0]['Sns']['Message'])
     
-    console.log('Instance info:', JSON.stringify(instanceInfo, null, 2));
+    # Extract alarm details
+    alarm_name = message['AlarmName']
+    alarm_description = message.get('AlarmDescription', 'No description')
+    trigger_time = message['StateChangeTime']
     
-    // Example action: Log current connections
-    console.log('Getting current connection info...');
+    # Get the RDS instance identifier from the alarm dimensions
+    dimensions = message['Trigger']['Dimensions']
+    instance_id = next((dim['value'] for dim in dimensions if dim['name'] == 'DBInstanceIdentifier'), 'Unknown')
     
-    // You could implement other actions like:
-    // - Increase instance class (would require a reboot)
-    // - Create a read replica
-    // - Run EXPLAIN ANALYZE on slow queries
+    print(f"Alarm: {alarm_name}")
+    print(f"Description: {alarm_description}")
+    print(f"RDS Instance: {instance_id}")
+    print(f"Triggered at: {trigger_time}")
+    print(f"Alarm state: {message['NewStateValue']}")
+    
+    # In a real scenario, you would implement actual remediation here
+    print("Possible remediation actions would include:")
+    print("1. Scaling up the instance")
+    print("2. Creating a read replica")
+    print("3. Killing long-running queries")
+    print("4. Enabling Performance Insights")
     
     return {
-      statusCode: 200,
-      body: JSON.stringify({
-        message: 'Remediation action initiated',
-        instanceId: instanceId
-      })
-    };
-  } else {
-    console.log('Alarm is not in ALARM state. No action taken.');
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        message: 'No action needed',
-        instanceId: instanceId
-      })
-    };
-  }
-};
+        'statusCode': 200,
+        'body': json.dumps({
+            'message': 'Remediation function activated',
+            'alarm': alarm_name,
+            'instance': instance_id
+        })
+    }
 ```
 
-4. Click "Deploy" to save the changes
+7. Click "Deploy" to save the changes
 
 #### 5.3 Add Lambda Permission for SNS
 1. In the Lambda function, go to the Configuration tab
-2. Click on "Triggers" → "Add trigger"
-3. Select "SNS" as the source
-4. Select your remediation topic
-5. Click "Add"
+2. Click on "Permissions" and note the role name
+3. Navigate to the "Triggers" section
+4. Click "Add trigger"
+5. Configure trigger:
+   - Select trigger: SNS
+   - SNS topic: Select the `{initials}-remediation-topic` created earlier
+6. Click "Add"
 
 #### 5.4 Update CloudWatch Alarm for Auto-Remediation
-1. Navigate back to CloudWatch → Alarms
+1. Navigate to CloudWatch → Alarms
 2. Select your RDS CPU alarm
 3. Click "Actions" → "Edit"
-4. Under the "Actions" section, add your remediation SNS topic
-5. Save changes
+4. Under the "Notification" section:
+   - Make sure your original email notification is still set up
+   - Add another action: Select the `{initials}-remediation-topic` SNS topic
+5. Click "Update"
 
 #### 5.5 Testing Auto-Remediation
-1. Run the load generator Lambda again with a higher concurrency value:
-   ```json
-   {
-     "concurrency": 30,
-     "duration": 120
-   }
+1. Run the EC2 load test script with higher concurrency:
+   ```
+   ./rds-load-test.sh 30 120
    ```
 2. Monitor in real-time:
    - CloudWatch alarm status
-   - Lambda execution logs for both functions
+   - Lambda execution logs in CloudWatch Logs
    - SNS notifications in your email
-   - RDS console for any changes
+   - Navigate to Lambda → Functions → `{initials}-rds-remediation` → Monitor tab to see invocation data
+3. After the test completes, check the lambda logs:
+   - In the Lambda console, select your function
+   - Go to the "Monitor" tab and click "View CloudWatch logs"
+   - Find the most recent log stream and verify that your function was triggered
 
 ### Module 6: Cleanup (15 minutes)
-1. Delete the Lambda functions
+1. Delete Lambda functions
 2. Delete CloudWatch alarms
 3. Delete SNS topics
 4. Terminate the EC2 instance
